@@ -24,6 +24,37 @@ If your token belongs to **one** workspace it is used automatically. If you belo
 - set a default: add `-e AACWORKFLOW_WORKSPACE_ID=<id>`, or
 - pass `workspace_id` per call — run `list_workspaces` first to see the ids.
 
+## Remote / hosted — work from anywhere (Claude Code, claude.ai, ChatGPT)
+
+The same code also runs as a **hosted, multi-tenant HTTP endpoint**. Host it once; any registered AACWorkflow user connects with **their own token** in the `Authorization` header and drives **their own** workspaces (companies). No shared credentials.
+
+### Run the server
+
+```bash
+# from source
+npm install && npm run build && PORT=8787 npm run start:http
+# or Docker
+docker build -t aacworkflow-mcp . && docker run -p 8787:8787 aacworkflow-mcp
+```
+
+Put it behind HTTPS (any reverse proxy / Coolify / Cloudflare) → e.g. `https://mcp.example.com/mcp`.
+Endpoints: `POST/GET/DELETE /mcp` (MCP Streamable HTTP) and `GET /health`.
+
+### Connect from Claude Code (remote)
+
+```bash
+claude mcp add aacworkflow --transport http https://mcp.example.com/mcp \
+  --header "Authorization: Bearer mul_your_token"
+```
+
+### Connect from ChatGPT (custom connector / developer mode)
+
+Settings → Connectors → **Add custom connector** → MCP server URL `https://mcp.example.com/mcp`, auth header `Authorization: Bearer mul_your_token`.
+
+### Marketplace / directory listing
+
+Personal use needs only the hosted URL above. To **publish in the directories** (Anthropic Connectors directory / OpenAI Apps), the platforms require **OAuth 2.1** and a vendor review submitted from your own org account — the bearer-token endpoint here is ready for private/team use today; OAuth can be layered on for public listing.
+
 ## Claude Desktop
 
 `~/Library/Application Support/Claude/claude_desktop_config.json`:
