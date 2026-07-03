@@ -84,7 +84,7 @@ describe("hosted HTTP app", () => {
     await client.connect(transport);
 
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(65);
+    expect(tools.length).toBe(69);
 
     await client.close();
   });
@@ -171,7 +171,7 @@ describe("hosted HTTP app", () => {
     const oauthClient = new Client({ name: "oauth-test-client", version: "0.0.0" });
     await oauthClient.connect(transport);
     const { tools } = await oauthClient.listTools();
-    expect(tools.length).toBe(65);
+    expect(tools.length).toBe(69);
     await oauthClient.close();
   });
 });

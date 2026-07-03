@@ -74,9 +74,9 @@ export function buildServer(cfg: Cfg): McpServer {
   global_("update_workspace", "Update a workspace's name, description, context, or issue prefix.", { id: z.string(), patch: z.record(z.any()) }, (a) => api("PUT", `/api/workspaces/${a.id}`, { scoped: false, body: a.patch }));
   scoped("list_members", "List members of a workspace.", {}, (ws) => api("GET", `/api/workspaces/${ws}/members`, { scoped: false }));
   scoped("list_runtimes", "List agent runtimes (machines) in the workspace.", {}, (ws) => api("GET", "/api/runtimes", { workspaceId: ws }));
-  scoped("update_runtime", "Update a runtime's configuration.", { id: z.string(), patch: z.record(z.any()) }, (ws, a) => api("PUT", `/api/runtimes/${a.id}`, { workspaceId: ws, body: a.patch }));
-  scoped("runtime_usage", "Resource consumption metrics for workspace runtimes.", {}, (ws) => api("GET", "/api/runtimes/usage", { workspaceId: ws }));
-  scoped("runtime_activity", "Activity log for workspace runtimes.", {}, (ws) => api("GET", "/api/runtimes/activity", { workspaceId: ws }));
+  scoped("update_runtime", "Update a runtime's configuration.", { id: z.string(), patch: z.record(z.any()) }, (ws, a) => api("PATCH", `/api/runtimes/${a.id}`, { workspaceId: ws, body: a.patch }));
+  scoped("get_runtime_usage", "Resource consumption metrics for one runtime.", { id: z.string() }, (ws, a) => api("GET", `/api/runtimes/${a.id}/usage`, { workspaceId: ws }));
+  scoped("get_runtime_activity", "Activity log for one runtime.", { id: z.string() }, (ws, a) => api("GET", `/api/runtimes/${a.id}/activity`, { workspaceId: ws }));
 
   // Agents
   scoped("list_agents", "List agents in the workspace.", {}, (ws) => api("GET", "/api/agents", { workspaceId: ws }));
@@ -95,8 +95,18 @@ export function buildServer(cfg: Cfg): McpServer {
   scoped("archive_agent", "Archive an agent (soft-delete; it stops picking up new work).", { id: z.string() }, (ws, a) => api("POST", `/api/agents/${a.id}/archive`, { workspaceId: ws, body: {} }));
   scoped("restore_agent", "Restore a previously archived agent.", { id: z.string() }, (ws, a) => api("POST", `/api/agents/${a.id}/restore`, { workspaceId: ws, body: {} }));
   scoped("list_agent_skills", "List skills attached to an agent.", { id: z.string() }, (ws, a) => api("GET", `/api/agents/${a.id}/skills`, { workspaceId: ws }));
-  scoped("attach_skill_to_agent", "Attach a skill to an agent.", { id: z.string(), skill_id: z.string() }, (ws, a) => api("POST", `/api/agents/${a.id}/skills`, { workspaceId: ws, body: { skill_id: a.skill_id } }));
-  scoped("detach_skill_from_agent", "Detach a skill from an agent.", { id: z.string(), skill_id: z.string() }, (ws, a) => api("DELETE", `/api/agents/${a.id}/skills/${a.skill_id}`, { workspaceId: ws }));
+  // /api/agents/:id/skills only accepts GET/PUT (no per-skill POST/DELETE) — attach/detach
+  // are read-modify-write conveniences over the full list, matching `aacworkflow agent skills`.
+  scoped("attach_skill_to_agent", "Attach a skill to an agent.", { id: z.string(), skill_id: z.string() }, async (ws, a) => {
+    const current = (await api("GET", `/api/agents/${a.id}/skills`, { workspaceId: ws })) as Array<{ id: string }>;
+    const ids = Array.from(new Set([...current.map((s) => s.id), a.skill_id]));
+    return api("PUT", `/api/agents/${a.id}/skills`, { workspaceId: ws, body: { skill_ids: ids } });
+  });
+  scoped("detach_skill_from_agent", "Detach a skill from an agent.", { id: z.string(), skill_id: z.string() }, async (ws, a) => {
+    const current = (await api("GET", `/api/agents/${a.id}/skills`, { workspaceId: ws })) as Array<{ id: string }>;
+    const ids = current.map((s) => s.id).filter((id) => id !== a.skill_id);
+    return api("PUT", `/api/agents/${a.id}/skills`, { workspaceId: ws, body: { skill_ids: ids } });
+  });
 
   // Skills
   scoped("list_skills", "List skills available in the workspace.", {}, (ws) => api("GET", "/api/skills", { workspaceId: ws }));
@@ -119,40 +129,49 @@ export function buildServer(cfg: Cfg): McpServer {
     due_date: z.string().optional().describe("ISO YYYY-MM-DD"),
   }, (ws, { workspace_id, ...body }) => api("POST", "/api/issues", { workspaceId: ws, body }));
   scoped("update_issue", "Update an issue.", { id: z.string(), patch: z.record(z.any()) }, (ws, a) => api("PUT", `/api/issues/${a.id}`, { workspaceId: ws, body: a.patch }));
+  scoped("delete_issue", "Delete an issue. Immediately clears its comments, reactions, and attachments — cannot be undone.", { id: z.string() }, (ws, a) => api("DELETE", `/api/issues/${a.id}`, { workspaceId: ws }));
   scoped("assign_issue_to_agent", "Assign an existing issue to an agent (dispatches the task).", { id: z.string(), agent_id: z.string() }, (ws, a) => api("PUT", `/api/issues/${a.id}`, { workspaceId: ws, body: { assignee_type: "agent", assignee_id: a.agent_id } }));
   scoped("rerun_issue", "Re-run an issue's agent task.", { id: z.string() }, (ws, a) => api("POST", `/api/issues/${a.id}/rerun`, { workspaceId: ws, body: {} }));
   scoped("comment_issue", "Add a comment to an issue.", { id: z.string(), body: z.string() }, (ws, a) => api("POST", `/api/issues/${a.id}/comments`, { workspaceId: ws, body: { body: a.body } }));
   scoped("list_comments", "List comments on an issue.", { id: z.string() }, (ws, a) => api("GET", `/api/issues/${a.id}/comments`, { workspaceId: ws }));
   scoped("search_issues", "Full-text search issues.", { q: z.string() }, (ws, a) => api("GET", "/api/issues/search", { workspaceId: ws, query: { q: a.q } }));
-  scoped("list_issue_runs", "List agent runs recorded against an issue.", { id: z.string() }, (ws, a) => api("GET", `/api/issues/${a.id}/runs`, { workspaceId: ws }));
   scoped("list_issue_subscribers", "List subscribers on an issue.", { id: z.string() }, (ws, a) => api("GET", `/api/issues/${a.id}/subscribers`, { workspaceId: ws }));
-  scoped("add_issue_subscriber", "Subscribe a user to an issue's notifications.", { id: z.string(), user_id: z.string() }, (ws, a) => api("POST", `/api/issues/${a.id}/subscribers`, { workspaceId: ws, body: { user_id: a.user_id } }));
-  scoped("remove_issue_subscriber", "Unsubscribe a user from an issue's notifications.", { id: z.string(), user_id: z.string() }, (ws, a) => api("DELETE", `/api/issues/${a.id}/subscribers/${a.user_id}`, { workspaceId: ws }));
-  scoped("get_attachment", "Get an issue/comment attachment's metadata (including its download URL).", { id: z.string() }, (ws, a) => api("GET", `/api/attachments/${a.id}`, { workspaceId: ws }));
+  scoped("subscribe_to_issue", "Subscribe to an issue's notifications.", { id: z.string() }, (ws, a) => api("POST", `/api/issues/${a.id}/subscribe`, { workspaceId: ws, body: { subscribed: true } }));
+  scoped("unsubscribe_from_issue", "Unsubscribe from an issue's notifications.", { id: z.string() }, (ws, a) => api("POST", `/api/issues/${a.id}/subscribe`, { workspaceId: ws, body: { subscribed: false } }));
+  scoped("list_issue_attachments", "List attachments on an issue.", { id: z.string() }, (ws, a) => api("GET", `/api/issues/${a.id}/attachments`, { workspaceId: ws }));
+  scoped("get_attachment", "Get an attachment's metadata (including its download URL).", { id: z.string() }, (ws, a) => api("GET", `/api/attachments/${a.id}`, { workspaceId: ws }));
+  scoped("delete_attachment", "Delete an attachment.", { id: z.string() }, (ws, a) => api("DELETE", `/api/attachments/${a.id}`, { workspaceId: ws }));
 
   // Projects / labels
   scoped("list_projects", "List projects in the workspace.", {}, (ws) => api("GET", "/api/projects", { workspaceId: ws }));
-  scoped("create_project", "Create a project.", { name: z.string(), description: z.string().optional() }, (ws, { workspace_id, ...body }) => api("POST", "/api/projects", { workspaceId: ws, body }));
+  scoped("create_project", "Create a project.", { title: z.string(), description: z.string().optional() }, (ws, { workspace_id, ...body }) => api("POST", "/api/projects", { workspaceId: ws, body }));
   scoped("update_project", "Update a project.", { id: z.string(), patch: z.record(z.any()) }, (ws, a) => api("PUT", `/api/projects/${a.id}`, { workspaceId: ws, body: a.patch }));
   scoped("delete_project", "Delete a project.", { id: z.string() }, (ws, a) => api("DELETE", `/api/projects/${a.id}`, { workspaceId: ws }));
   scoped("list_labels", "List issue labels.", {}, (ws) => api("GET", "/api/labels", { workspaceId: ws }));
   scoped("create_label", "Create an issue label.", { name: z.string(), color: z.string().optional() }, (ws, { workspace_id, ...body }) => api("POST", "/api/labels", { workspaceId: ws, body }));
+  scoped("update_label", "Update an issue label.", { id: z.string(), patch: z.record(z.any()) }, (ws, a) => api("PUT", `/api/labels/${a.id}`, { workspaceId: ws, body: a.patch }));
+  scoped("delete_label", "Delete an issue label.", { id: z.string() }, (ws, a) => api("DELETE", `/api/labels/${a.id}`, { workspaceId: ws }));
 
   // Squads
   scoped("list_squads", "List squads (teams).", {}, (ws) => api("GET", "/api/squads", { workspaceId: ws }));
   scoped("get_squad", "Get one squad with its members.", { id: z.string() }, (ws, a) => api("GET", `/api/squads/${a.id}`, { workspaceId: ws }));
-  scoped("create_squad", "Create a squad.", { name: z.string(), leader: z.string().describe("agent id/slug leading the squad"), description: z.string().optional() }, (ws, { workspace_id, ...body }) => api("POST", "/api/squads", { workspaceId: ws, body }));
+  scoped("create_squad", "Create a squad.", { name: z.string(), leader_id: z.string().describe("agent id leading the squad"), description: z.string().optional() }, (ws, { workspace_id, ...body }) => api("POST", "/api/squads", { workspaceId: ws, body }));
   scoped("update_squad", "Update a squad's properties.", { id: z.string(), patch: z.record(z.any()) }, (ws, a) => api("PUT", `/api/squads/${a.id}`, { workspaceId: ws, body: a.patch }));
   scoped("delete_squad", "Archive (soft-delete) a squad; assigned issues transfer to its leader.", { id: z.string() }, (ws, a) => api("DELETE", `/api/squads/${a.id}`, { workspaceId: ws }));
   scoped("list_squad_members", "List a squad's members.", { id: z.string() }, (ws, a) => api("GET", `/api/squads/${a.id}/members`, { workspaceId: ws }));
-  scoped("add_squad_member", "Add an agent to a squad.", { id: z.string(), agent_id: z.string() }, (ws, a) => api("POST", `/api/squads/${a.id}/members`, { workspaceId: ws, body: { agent_id: a.agent_id } }));
-  scoped("remove_squad_member", "Remove a member from a squad.", { id: z.string(), agent_id: z.string() }, (ws, a) => api("DELETE", `/api/squads/${a.id}/members/${a.agent_id}`, { workspaceId: ws }));
+  scoped("add_squad_member", "Add an agent to a squad.", { id: z.string(), agent_id: z.string() }, (ws, a) => api("POST", `/api/squads/${a.id}/members`, { workspaceId: ws, body: { member_type: "agent", member_id: a.agent_id } }));
+  scoped("remove_squad_member", "Remove a member from a squad.", { id: z.string(), agent_id: z.string() }, (ws, a) => api("DELETE", `/api/squads/${a.id}/members`, { workspaceId: ws, body: { member_id: a.agent_id } }));
 
   // Autopilots
   scoped("list_autopilots", "List autopilots (scheduled/triggered automations).", {}, (ws) => api("GET", "/api/autopilots", { workspaceId: ws }));
   scoped("get_autopilot", "Get one autopilot.", { id: z.string() }, (ws, a) => api("GET", `/api/autopilots/${a.id}`, { workspaceId: ws }));
-  scoped("create_autopilot", "Create an autopilot.", { name: z.string(), description: z.string().optional(), config: z.record(z.any()).optional().describe("trigger/schedule configuration") }, (ws, { workspace_id, ...body }) => api("POST", "/api/autopilots", { workspaceId: ws, body }));
-  scoped("update_autopilot", "Update an autopilot.", { id: z.string(), patch: z.record(z.any()) }, (ws, a) => api("PUT", `/api/autopilots/${a.id}`, { workspaceId: ws, body: a.patch }));
+  scoped("create_autopilot", "Create an autopilot — a recurring/triggered automation that files an issue for an agent.", {
+    title: z.string(), description: z.string().optional(),
+    assignee_type: z.enum(["agent", "user"]), assignee_id: z.string().describe("agent (or user) that receives the generated issue"),
+    execution_mode: z.string().describe("e.g. 'create_issue'"), project_id: z.string().optional(),
+    issue_title_template: z.string().optional(),
+  }, (ws, { workspace_id, ...body }) => api("POST", "/api/autopilots", { workspaceId: ws, body }));
+  scoped("update_autopilot", "Update an autopilot.", { id: z.string(), patch: z.record(z.any()) }, (ws, a) => api("PATCH", `/api/autopilots/${a.id}`, { workspaceId: ws, body: a.patch }));
   scoped("delete_autopilot", "Delete an autopilot.", { id: z.string() }, (ws, a) => api("DELETE", `/api/autopilots/${a.id}`, { workspaceId: ws }));
   scoped("trigger_autopilot", "Manually trigger an autopilot run.", { id: z.string() }, (ws, a) => api("POST", `/api/autopilots/${a.id}/trigger`, { workspaceId: ws, body: {} }));
   scoped("list_autopilot_runs", "List runs of an autopilot.", { id: z.string() }, (ws, a) => api("GET", `/api/autopilots/${a.id}/runs`, { workspaceId: ws }));

@@ -107,21 +107,21 @@ cd aacworkflow-mcp && npm install && npm run build
 claude mcp add aacworkflow -e AACWORKFLOW_TOKEN=mul_xxx -- node "$PWD/dist/index.js"
 ```
 
-## Tools (65)
+## Tools (69)
 
 - **Account/workspace:** `whoami`, `list_workspaces`, `get_workspace`, `update_workspace`, `list_members`
-- **Runtimes:** `list_runtimes`, `update_runtime`, `runtime_usage`, `runtime_activity`
+- **Runtimes:** `list_runtimes`, `update_runtime`, `get_runtime_usage`, `get_runtime_activity`
 - **Agents:** `list_agents`, `get_agent`, `create_agent`, `update_agent`, `archive_agent`, `restore_agent`, `list_agent_templates`, `create_agent_from_template`, `list_agent_tasks`, `list_agent_skills`, `attach_skill_to_agent`, `detach_skill_from_agent`
 - **Skills:** `list_skills`, `get_skill`, `create_skill`, `update_skill`, `delete_skill`, `import_skill`
-- **Tasks (issues):** `list_issues`, `get_issue`, `create_issue`, `update_issue`, `assign_issue_to_agent`, `rerun_issue`, `comment_issue`, `list_comments`, `search_issues`, `list_issue_runs`, `list_issue_subscribers`, `add_issue_subscriber`, `remove_issue_subscriber`, `get_attachment`
-- **Projects / labels:** `list_projects`, `create_project`, `update_project`, `delete_project`, `list_labels`, `create_label`
+- **Tasks (issues):** `list_issues`, `get_issue`, `create_issue`, `update_issue`, `delete_issue`, `assign_issue_to_agent`, `rerun_issue`, `comment_issue`, `list_comments`, `search_issues`, `list_issue_subscribers`, `subscribe_to_issue`, `unsubscribe_from_issue`, `list_issue_attachments`, `get_attachment`, `delete_attachment`
+- **Projects / labels:** `list_projects`, `create_project`, `update_project`, `delete_project`, `list_labels`, `create_label`, `update_label`, `delete_label`
 - **Squads:** `list_squads`, `get_squad`, `create_squad`, `update_squad`, `delete_squad`, `list_squad_members`, `add_squad_member`, `remove_squad_member`
 - **Autopilots:** `list_autopilots`, `get_autopilot`, `create_autopilot`, `update_autopilot`, `delete_autopilot`, `trigger_autopilot`, `list_autopilot_runs`
 - **Analytics:** `dashboard_usage_daily`, `dashboard_usage_by_agent`, `dashboard_agent_runtime`
 
 > **Dispatch work to an agent:** `create_issue` with `assignee_type:"agent"` + `assignee_id`, or `assign_issue_to_agent` on an existing issue — the agent's runtime daemon picks it up and runs it.
 
-> **Endpoint provenance:** AACWorkflow doesn't publish an OpenAPI/Swagger spec. The original 34 tools were verified against the live API; the rest were added by mapping [`aacworkflow` CLI commands](https://aacworkflow.com/docs/cli) to REST calls by analogy with the existing ones (e.g. `squad member add` → `POST /api/squads/:id/members`). If one of the newer tools 404s against your instance, that's why — open an issue with the correct path and it'll get fixed.
+> **Endpoint provenance:** AACWorkflow doesn't publish an OpenAPI/Swagger spec. Every tool listed above has been exercised against the live API (`https://aacworkflow.com`) with a real token — read-only tools by calling them directly, mutating ones by inspecting `OPTIONS` allowed-methods and validation-error messages (e.g. a missing required field 400s with its name) rather than by guessing. That pass caught and fixed several real bugs versus the original CLI-based guesses: `create_project`/`create_autopilot` need `title` not `name`; `create_squad` needs `leader_id` not `leader`; `update_runtime`/`update_autopilot` are `PATCH` not `PUT`; squad member add/remove use `{member_type, member_id}` and a body-based `DELETE` rather than a nested path; agent↔skill attach/detach is a read-then-`PUT`-the-full-list operation, not per-skill POST/DELETE; issue subscribe/unsubscribe is `POST .../subscribe` with `{subscribed: true|false}`, not REST verbs on `.../subscribers`; and a documented `.../issues/:id/runs` endpoint doesn't exist (removed). If something still 404s on your instance, open an issue with the correct path.
 
 ## Config
 
