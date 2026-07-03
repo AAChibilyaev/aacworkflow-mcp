@@ -106,10 +106,30 @@ describe("buildServer tools", () => {
     expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({ assignee_type: "agent", assignee_id: "ag_1" });
   });
 
-  it("registers exactly the 34 documented tools", async () => {
+  it("registers exactly the 65 documented tools", async () => {
     const client = await connectedClient(fetchMock);
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(34);
-    expect(tools.map((t) => t.name)).toContain("create_issue");
+    expect(tools).toHaveLength(65);
+    const names = tools.map((t) => t.name);
+    expect(names).toContain("create_issue");
+    expect(names).toContain("list_skills");
+    expect(names).toContain("update_squad");
+  });
+
+  it("builds nested paths for the new skills/squad-member/workspace endpoints", async () => {
+    const client = await connectedClient(fetchMock, { defaultWorkspace: "ws1" });
+
+    await client.callTool({ name: "delete_skill", arguments: { id: "sk_1" } });
+    expect(calls[0]!.url).toBe("https://aac.example/api/skills/sk_1?workspace_id=ws1");
+    expect(calls[0]!.init?.method).toBe("DELETE");
+
+    await client.callTool({ name: "add_squad_member", arguments: { id: "sq_1", agent_id: "ag_1" } });
+    expect(calls[1]!.url).toBe("https://aac.example/api/squads/sq_1/members?workspace_id=ws1");
+    expect(JSON.parse(calls[1]!.init?.body as string)).toEqual({ agent_id: "ag_1" });
+
+    await client.callTool({ name: "update_workspace", arguments: { id: "ws1", patch: { name: "New Name" } } });
+    expect(calls[2]!.url).toBe("https://aac.example/api/workspaces/ws1");
+    expect(calls[2]!.init?.method).toBe("PUT");
+    expect(JSON.parse(calls[2]!.init?.body as string)).toEqual({ name: "New Name" });
   });
 });
