@@ -93,7 +93,12 @@ export function buildApp(cfg: AppCfg): { app: express.Express; cleanup: () => vo
       issuerUrl: PUBLIC_URL,
       resourceServerUrl: MCP_URL,
       resourceName: "AACWorkflow",
-      scopesSupported: ["aacworkflow"],
+      // "offline_access" must be advertised (not just granted) for ChatGPT's
+      // connector setup to trust that refresh tokens will keep working —
+      // otherwise it may treat the session as non-renewable and force
+      // re-auth once the 1h access token expires, even though this server
+      // always issues a refresh_token on every grant (see oauth.ts).
+      scopesSupported: ["aacworkflow", "offline_access"],
     }),
   );
 
