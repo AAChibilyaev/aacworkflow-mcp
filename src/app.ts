@@ -36,6 +36,10 @@ export function buildApp(cfg: AppCfg): { app: express.Express; cleanup: () => vo
   const MCP_URL = new URL("/mcp", PUBLIC_URL);
 
   const app = express();
+  // Coolify/Traefik sits in front of this app and sets X-Forwarded-For on every
+  // request. Without this, express-rate-limit refuses to trust that header and
+  // logs an ERR_ERL_UNEXPECTED_X_FORWARDED_FOR warning on every real request.
+  app.set("trust proxy", 1);
   app.use(express.json({ limit: "4mb" }));
 
   app.use((req, res, next) => {

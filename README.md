@@ -107,7 +107,7 @@ cd aacworkflow-mcp && npm install && npm run build
 claude mcp add aacworkflow -e AACWORKFLOW_TOKEN=mul_xxx -- node "$PWD/dist/index.js"
 ```
 
-## Tools (69)
+## Tools (71)
 
 - **Account/workspace:** `whoami`, `list_workspaces`, `get_workspace`, `update_workspace`, `list_members`
 - **Runtimes:** `list_runtimes`, `update_runtime`, `get_runtime_usage`, `get_runtime_activity`
@@ -118,10 +118,17 @@ claude mcp add aacworkflow -e AACWORKFLOW_TOKEN=mul_xxx -- node "$PWD/dist/index
 - **Squads:** `list_squads`, `get_squad`, `create_squad`, `update_squad`, `delete_squad`, `list_squad_members`, `add_squad_member`, `remove_squad_member`
 - **Autopilots:** `list_autopilots`, `get_autopilot`, `create_autopilot`, `update_autopilot`, `delete_autopilot`, `trigger_autopilot`, `list_autopilot_runs`
 - **Analytics:** `dashboard_usage_daily`, `dashboard_usage_by_agent`, `dashboard_agent_runtime`
+- **Discovery:** `get_capabilities` (feature flags, incl. what's deliberately *not* implemented), `get_metadata` (every enum the schemas below use — statuses, priorities, assignee/execution modes, error codes)
 
 > **Dispatch work to an agent:** `create_issue` with `assignee_type:"agent"` + `assignee_id`, or `assign_issue_to_agent` on an existing issue — the agent's runtime daemon picks it up and runs it.
 
-> **Endpoint provenance:** AACWorkflow doesn't publish an OpenAPI/Swagger spec. Every tool listed above has been exercised against the live API (`https://aacworkflow.com`) with a real token — read-only tools by calling them directly, mutating ones by inspecting `OPTIONS` allowed-methods and validation-error messages (e.g. a missing required field 400s with its name) rather than by guessing. That pass caught and fixed several real bugs versus the original CLI-based guesses: `create_project`/`create_autopilot` need `title` not `name`; `create_squad` needs `leader_id` not `leader`; `update_runtime`/`update_autopilot` are `PATCH` not `PUT`; squad member add/remove use `{member_type, member_id}` and a body-based `DELETE` rather than a nested path; agent↔skill attach/detach is a read-then-`PUT`-the-full-list operation, not per-skill POST/DELETE; issue subscribe/unsubscribe is `POST .../subscribe` with `{subscribed: true|false}`, not REST verbs on `.../subscribers`; and a documented `.../issues/:id/runs` endpoint doesn't exist (removed). If something still 404s on your instance, open an issue with the correct path.
+> **Endpoint provenance:** AACWorkflow doesn't publish an OpenAPI/Swagger spec. Every tool listed above has been exercised against the live API (`https://aacworkflow.com`) with a real token — read-only tools by calling them directly, mutating ones by inspecting `OPTIONS` allowed-methods and validation-error messages (e.g. a missing required field 400s with its name) rather than by guessing. That pass caught and fixed several real bugs versus the original CLI-based guesses: `create_project`/`create_autopilot` need `title` not `name`; `create_squad` needs `leader_id` not `leader`; `update_runtime`/`update_autopilot` are `PATCH` not `PUT`; squad member add/remove use `{member_type, member_id}` and a body-based `DELETE` rather than a nested path; agent↔skill attach/detach is a read-then-`PUT`-the-full-list operation, not per-skill POST/DELETE; issue subscribe/unsubscribe is `POST .../subscribe` with `{subscribed: true|false}`, not REST verbs on `.../subscribers`; a documented `.../issues/:id/runs` endpoint doesn't exist (removed); and `assignee_type` is `agent | member | squad` — never `user`. If something still 404s on your instance, open an issue with the correct path.
+
+### Agent contract (annotations, schemas, structured output)
+
+Every tool declares MCP `ToolAnnotations` (`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`) so a client can judge risk before calling — e.g. `import_skill` is `openWorldHint: true` (fetches an external URL), `delete_issue` is `destructiveHint: true`. Every `update_*` tool takes field-level Zod schemas, not `patch: Record<string, any>`. Every tool has a real `outputSchema` and returns `structuredContent` (plus a JSON-text fallback in `content`), so a client can chain `create_issue` → `issue.id` → `assign_issue_to_agent` without parsing text. All destructive tools accept `dry_run: true` to preview the resource instead of deleting it. `workspace_id` is required on every write tool (optional, best-effort-resolved on reads) — the server never guesses which of your workspaces to mutate. Errors are structured `{code, message, retryable, retry_after_ms?}` with `code` one of `NOT_FOUND | UNAUTHORIZED | FORBIDDEN | INVALID_ARGUMENT | CONFLICT | RATE_LIMITED | TIMEOUT | INTERNAL_ERROR`. The server also sets MCP `instructions` describing the Workspace → Project → Squad → Agent → Issue model, so a client doesn't need that re-explained per chat.
+
+**Deliberately not implemented** (see `get_capabilities.excluded_by_design`): per-tool OAuth scopes, and a first-class Run API (`list_runs`/`pause_run`/...). AACWorkflow's own tokens have no scope system server-side and its API has no run-level pause/resume/retry endpoints — either would be decorative, not enforced, if bolted onto this MCP layer alone. `list_agent_tasks` / `rerun_issue` expose what's really there instead.
 
 ## Config
 
