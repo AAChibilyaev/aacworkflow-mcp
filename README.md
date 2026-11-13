@@ -4,7 +4,7 @@
 
 MCP server that lets **Claude** and **Claude Code** drive [AACWorkflow](https://aacworkflow.com): tasks (issues), agents, projects, squads, autopilots and analytics.
 
-**Bring your own token.** Every user runs their own copy with their own AACWorkflow token — there is no shared server and no central credential store. Your token scopes you to the workspaces (companies) you belong to, and you can drive several from one install.
+**Bring your own token.** Local installs use your personal AACWorkflow token. The hosted endpoint keeps each connecting user's credentials separate and can persist OAuth credentials in encrypted storage. Your token scopes you to the workspaces (companies) you belong to, and you can drive several from one install.
 
 ## Quick start (any AACWorkflow user)
 
@@ -75,7 +75,11 @@ If your connector only supports static bearer tokens, you can still skip OAuth e
 | `POST /register` | RFC 7591 dynamic client registration |
 | `POST /revoke` | RFC 7009 token revocation |
 
-Tokens are in-memory only (opaque `aacmcp_at_…` / `aacmcp_rt_…`, 1h access / rotating refresh) — restarting the process ends all OAuth sessions; clients re-run the flow automatically. This is intentional for a single-instance deployment; there is no cross-instance token store.
+Tokens are opaque (`aacmcp_at_…` / `aacmcp_rt_…`, 1h access / rotating refresh). For hosted deployments, configure `AACWORKFLOW_MCP_STATE_FILE` on a persistent volume and `AACWORKFLOW_MCP_STATE_KEY` as a stable 64-character hexadecimal encryption key in the hosting platform's secret settings. Registered clients and issued tokens then survive process restarts. The state file is AES-256-GCM encrypted and written atomically with mode `0600`; unreadable, corrupted, or incorrectly encrypted state prevents startup rather than silently invalidating existing credentials. A failed write disables authorization and makes `/health` return `503`; repair storage and restart the process to resume using the last saved state.
+
+For example, mount a volume at `/data/oauth` writable by the container's `node` user (uid 1000), set `AACWORKFLOW_MCP_STATE_FILE=/data/oauth/state.enc`, and generate the key with `openssl rand -hex 32`. Keep the key unchanged across redeploys and back up the volume together with its key using your normal secret-backup process. Do not commit the key or include it in logs. A single server process must own the file; this is not a shared store for multiple replicas.
+
+Without these two settings, OAuth state remains ephemeral for backward compatibility. Previously lost credentials cannot be reconstructed: an already disconnected client needs one new authorization after persistence is enabled. Pending browser authorization transactions, authorization codes, and MCP transport sessions remain in memory; clients can initialize a new transport after a restart using their retained credentials.
 
 ### Marketplace / directory listing
 
@@ -147,13 +151,17 @@ Every tool declares MCP `ToolAnnotations` (`readOnlyHint` / `destructiveHint` / 
 | `PORT` | `8787` | listen port |
 | `AACWORKFLOW_SERVER_URL` | `https://aacworkflow.com` | upstream AACWorkflow API |
 | `AACWORKFLOW_MCP_PUBLIC_URL` | `http://127.0.0.1:$PORT` | **set this in production** — the public origin clients reach you at; OAuth issuer/redirect/metadata URLs are derived from it |
+| `AACWORKFLOW_MCP_STATE_FILE` | — | encrypted OAuth state file on a persistent volume; set together with the key |
+| `AACWORKFLOW_MCP_STATE_KEY` | — | stable 64-character hexadecimal encryption key, supplied through secret settings |
 
 ## Operations
 
 - **Rate limiting:** `/mcp` is capped at 120 req/min per IP; the OAuth endpoints (`/authorize`, `/token`, `/register`, `/revoke`) have their own stricter limits built into the SDK's auth router.
+- **Session identity:** a transport session belongs to its OAuth client and underlying AACWorkflow identity. Other authenticated callers receive `403` when attempting to use, stream, or delete that session; rotating the owner's OAuth access token preserves access.
+- **Refresh scopes:** refresh requests can retain or narrow their original grant; expansion is rejected before consuming the refresh token.
 - **Logging:** one structured JSON line per request to stdout (method, path, status, latency, session id) — no tokens are ever logged; OAuth token log lines carry only an 8-char prefix for correlation.
-- **Session lifecycle:** idle MCP sessions (no request for 30 minutes) are reaped every 5 minutes to bound memory; `SIGTERM`/`SIGINT` drain in-flight sessions and OAuth state before exiting.
-- **Scaling:** session and OAuth-token state is in-process memory, sized for a single instance (which is what a Coolify/Cloudflare deployment of this project is). Running multiple replicas needs sticky sessions in front — there's no shared session/token store.
+- **Session lifecycle:** idle MCP sessions (no request for 30 minutes) are reaped every 5 minutes to bound memory; `SIGTERM`/`SIGINT` close transport sessions. Configured OAuth state is saved on each client registration, token issue/rotation/revocation, and access-token expiration.
+- **Scaling:** transport sessions remain in-process; the optional encrypted OAuth file has one process owner. Multiple replicas require a shared store and coordinated session routing.
 
 ## Development
 

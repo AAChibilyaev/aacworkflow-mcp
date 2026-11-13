@@ -17,11 +17,12 @@
  * to redirect to. The token is verified against `${serverUrl}/api/me`
  * before an authorization code is issued, and never leaves the process.
  *
- * Everything is in-memory: fine for a single instance (the deployment this
- * project targets). Restarting the process invalidates all sessions; OAuth
- * clients handle that transparently via re-authorization.
+ * Hosted deployments can persist clients and issued tokens in an encrypted
+ * file, so routine process restarts do not invalidate connector refresh tokens.
+ * Pending browser transactions and authorization codes remain short-lived memory.
  */
 import { randomBytes, randomUUID } from "node:crypto";
+import { z } from "zod";
 import type { Response } from "express";
 import type { AuthorizationParams, OAuthServerProvider } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
@@ -30,9 +31,11 @@ import type {
   OAuthTokenRevocationRequest,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { OAuthClientInformationFullSchema } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import { InvalidClientError, InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { InvalidClientError, InvalidGrantError, InvalidScopeError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { logger, redact } from "./logger.js";
+import { OAuthStateFile, type OAuthStateConfig } from "./oauth-state.js";
 
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60; // 1h
 const AUTH_CODE_TTL_SECONDS = 5 * 60;
@@ -78,7 +81,7 @@ function authorizePage(opts: { txnId: string; clientName: string; error?: string
 </style></head>
 <body>
   <h1><span class="app">${escapeHtml(opts.clientName)}</span> wants to access your AACWorkflow account</h1>
-  <p>Paste an AACWorkflow API token to continue. It is used only to complete this sign-in and is never stored in plain form beyond this session.</p>
+  <p>Paste an AACWorkflow API token to continue. It authorizes this connector to access your AACWorkflow account. The server keeps your token for these requests and encrypts it at rest when persistent storage is configured.</p>
   ${opts.error ? `<div class="error">${escapeHtml(opts.error)}</div>` : ""}
   <form method="POST" action="/authorize/verify">
     <input type="hidden" name="txn" value="${escapeHtml(opts.txnId)}">
@@ -95,16 +98,51 @@ export type OAuthProvider = OAuthServerProvider & {
   completeAuthorization(txnId: string, token: string, res: Response): Promise<void>;
   /** Stops the background cleanup sweep. Call on graceful shutdown / in tests. */
   stop(): void;
+  /** A failed durable write disables OAuth until storage is repaired and the process restarted. */
+  isHealthy(): boolean;
 };
 
-export function createOAuthProvider(cfg: { serverUrl: string }): OAuthProvider {
+export function createOAuthProvider(cfg: { serverUrl: string; state?: OAuthStateConfig }): OAuthProvider {
   const SERVER_URL = cfg.serverUrl.replace(/\/+$/, "");
-
-  const clients = new Map<string, OAuthClientInformationFull>();
+  const stateFile = cfg.state ? new OAuthStateFile(cfg.state) : undefined;
+  const saved = stateFile?.load();
+  const stateSchema = z.object({
+    version: z.literal(1),
+    clients: z.array(z.tuple([z.string(), z.unknown()])),
+    accessTokens: z.array(z.tuple([z.string(), z.object({ clientId: z.string(), scopes: z.array(z.string()), aacToken: z.string(), expiresAt: z.number().optional() })])),
+    refreshTokens: z.array(z.tuple([z.string(), z.object({ clientId: z.string(), scopes: z.array(z.string()), aacToken: z.string(), expiresAt: z.number().optional() })])),
+  });
+  const parsed = saved === undefined ? undefined : stateSchema.safeParse(saved);
+  if (parsed && !parsed.success) throw new Error("Invalid encrypted OAuth state schema");
+  const initial = parsed?.success ? parsed.data : undefined;
+  // The SDK schema uses its own Zod version; validate each client separately
+  // rather than nesting that schema inside this package's Zod 3 schema.
+  const clients = new Map<string, OAuthClientInformationFull>(initial?.clients.map(([id, value]): [string, OAuthClientInformationFull] => {
+    const client = OAuthClientInformationFullSchema.safeParse(value);
+    if (!client.success || client.data.client_id !== id) throw new Error("Invalid encrypted OAuth client state");
+    return [id, client.data];
+  }));
   const pending = new Map<string, PendingAuthorization>();
   const codes = new Map<string, IssuedCode>();
-  const accessTokens = new Map<string, IssuedToken>();
-  const refreshTokens = new Map<string, IssuedToken>();
+  const accessTokens = new Map<string, IssuedToken>(initial?.accessTokens);
+  const refreshTokens = new Map<string, IssuedToken>(initial?.refreshTokens);
+  let storageHealthy = true;
+
+  function persist() {
+    try {
+      stateFile?.save({ version: 1, clients: [...clients], accessTokens: [...accessTokens], refreshTokens: [...refreshTokens] });
+    } catch (error) {
+      // In-memory changes must never become usable after an unsuccessful save.
+      storageHealthy = false;
+      logger.error("OAuth state storage is unavailable");
+      throw error;
+    }
+  }
+  function requireHealthyStorage() {
+    if (!storageHealthy) throw new Error("OAuth state storage is unavailable");
+  }
+  // Validate storage permissions before accepting connections, not at first login.
+  persist();
 
   async function verifyAacToken(token: string): Promise<boolean> {
     try {
@@ -117,28 +155,49 @@ export function createOAuthProvider(cfg: { serverUrl: string }): OAuthProvider {
   }
 
   const clientsStore: OAuthRegisteredClientsStore = {
-    getClient: (clientId) => clients.get(clientId),
+    getClient: (clientId) => {
+      requireHealthyStorage();
+      return clients.get(clientId);
+    },
     registerClient: (client) => {
+      requireHealthyStorage();
       const full = client as OAuthClientInformationFull;
       clients.set(full.client_id, full);
+      persist();
       logger.info("oauth client registered", { clientId: full.client_id, name: full.client_name });
       return full;
     },
   };
 
   function sweep() {
+    if (!storageHealthy) return;
     const t = now();
     for (const [id, p] of pending) if (p.expiresAt < t) pending.delete(id);
     for (const [c, e] of codes) if (e.expiresAt < t) codes.delete(c);
-    for (const [tok, e] of accessTokens) if (e.expiresAt !== undefined && e.expiresAt < t) accessTokens.delete(tok);
+    let removed = false;
+    for (const [tok, e] of accessTokens) {
+      if (e.expiresAt !== undefined && e.expiresAt < t) {
+        accessTokens.delete(tok);
+        removed = true;
+      }
+    }
+    if (removed) persist();
   }
-  const sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
+  const sweepTimer = setInterval(() => {
+    try {
+      sweep();
+    } catch {
+      // persist() already logged and disabled authorization; keep health503
+      // available to the operator instead of crashing from an interval callback.
+    }
+  }, SWEEP_INTERVAL_MS);
   sweepTimer.unref?.();
 
   const provider: OAuthProvider = {
     clientsStore,
 
     async authorize(client, params, res) {
+      requireHealthyStorage();
       const txnId = randomUUID();
       pending.set(txnId, { client, params, expiresAt: now() + PENDING_TXN_TTL_SECONDS });
       res
@@ -148,6 +207,7 @@ export function createOAuthProvider(cfg: { serverUrl: string }): OAuthProvider {
     },
 
     async completeAuthorization(txnId, token, res) {
+      requireHealthyStorage();
       const entry = pending.get(txnId);
       if (!entry) {
         res.status(400).type("html").send(authorizePage({ txnId, clientName: "This app", error: "This authorization request has expired. Please try connecting again." }));
@@ -182,6 +242,7 @@ export function createOAuthProvider(cfg: { serverUrl: string }): OAuthProvider {
     },
 
     async challengeForAuthorizationCode(client, authorizationCode) {
+      requireHealthyStorage();
       const entry = codes.get(authorizationCode);
       if (!entry || entry.clientId !== client.client_id) throw new InvalidGrantError("Invalid authorization code");
       if (entry.expiresAt < now()) {
@@ -192,6 +253,7 @@ export function createOAuthProvider(cfg: { serverUrl: string }): OAuthProvider {
     },
 
     async exchangeAuthorizationCode(client, authorizationCode, _codeVerifier, redirectUri) {
+      requireHealthyStorage();
       const entry = codes.get(authorizationCode);
       if (!entry || entry.clientId !== client.client_id) throw new InvalidGrantError("Invalid authorization code");
       if (entry.expiresAt < now()) {
@@ -206,6 +268,7 @@ export function createOAuthProvider(cfg: { serverUrl: string }): OAuthProvider {
       const issued: IssuedToken = { clientId: client.client_id, scopes: entry.scopes, aacToken: entry.aacToken, expiresAt: now() + ACCESS_TOKEN_TTL_SECONDS };
       accessTokens.set(accessToken, issued);
       refreshTokens.set(refreshToken, { ...issued, expiresAt: undefined });
+      persist();
       logger.info("oauth token issued", { clientId: client.client_id, grant: "authorization_code", token: redact(accessToken) });
 
       return {
@@ -218,16 +281,21 @@ export function createOAuthProvider(cfg: { serverUrl: string }): OAuthProvider {
     },
 
     async exchangeRefreshToken(client, refreshToken, scopes) {
+      requireHealthyStorage();
       const entry = refreshTokens.get(refreshToken);
       if (!entry || entry.clientId !== client.client_id) throw new InvalidGrantError("Invalid refresh token");
+      const grantedScopes = scopes ?? entry.scopes;
+      if (grantedScopes.some((scope) => !entry.scopes.includes(scope))) {
+        throw new InvalidScopeError("Refresh scope must be a subset of the original grant");
+      }
 
       // Rotate the refresh token so a leaked/replayed one stops working once used.
       refreshTokens.delete(refreshToken);
       const newAccess = newToken("aacmcp_at");
       const newRefresh = newToken("aacmcp_rt");
-      const grantedScopes = scopes ?? entry.scopes;
       accessTokens.set(newAccess, { clientId: client.client_id, scopes: grantedScopes, aacToken: entry.aacToken, expiresAt: now() + ACCESS_TOKEN_TTL_SECONDS });
       refreshTokens.set(newRefresh, { clientId: client.client_id, scopes: grantedScopes, aacToken: entry.aacToken, expiresAt: undefined });
+      persist();
       logger.info("oauth token issued", { clientId: client.client_id, grant: "refresh_token", token: redact(newAccess) });
 
       return {
@@ -240,10 +308,12 @@ export function createOAuthProvider(cfg: { serverUrl: string }): OAuthProvider {
     },
 
     async verifyAccessToken(token) {
+      requireHealthyStorage();
       const entry = accessTokens.get(token);
       if (entry) {
         if (entry.expiresAt !== undefined && entry.expiresAt < now()) {
           accessTokens.delete(token);
+          persist();
           throw new InvalidTokenError("Access token expired");
         }
         return { token, clientId: entry.clientId, scopes: entry.scopes, expiresAt: entry.expiresAt, extra: { aacToken: entry.aacToken } } satisfies AuthInfo;
@@ -260,23 +330,30 @@ export function createOAuthProvider(cfg: { serverUrl: string }): OAuthProvider {
     },
 
     async revokeToken(client, request: OAuthTokenRevocationRequest) {
+      requireHealthyStorage();
       const { token } = request;
       const access = accessTokens.get(token);
       if (access) {
         if (access.clientId !== client.client_id) throw new InvalidClientError("Token was not issued to this client");
         accessTokens.delete(token);
+        persist();
         return;
       }
       const refresh = refreshTokens.get(token);
       if (refresh) {
         if (refresh.clientId !== client.client_id) throw new InvalidClientError("Token was not issued to this client");
         refreshTokens.delete(token);
+        persist();
       }
       // Unknown token: no-op per RFC 7009.
     },
 
     stop() {
       clearInterval(sweepTimer);
+    },
+
+    isHealthy() {
+      return storageHealthy;
     },
   };
 

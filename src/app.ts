@@ -9,7 +9,7 @@
  *    ending in an opaque `aacmcp_at_…` token that maps back to a mul_ token
  *    (what claude.ai / ChatGPT connectors require). See src/oauth.ts.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import express, { type Request, type Response } from "express";
 import { rateLimit } from "express-rate-limit";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -18,6 +18,7 @@ import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelconte
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { buildServer } from "./server.js";
 import { createOAuthProvider } from "./oauth.js";
+import type { OAuthStateConfig } from "./oauth-state.js";
 import { logger } from "./logger.js";
 
 export type AppCfg = {
@@ -25,6 +26,8 @@ export type AppCfg = {
   serverUrl: string;
   /** Public origin this app is reachable at, e.g. https://mcp.example.com or http://127.0.0.1:8787 for local/dev. */
   publicUrl: string;
+  /** Optional encrypted OAuth state on a persistent, single-instance volume. */
+  oauthState?: OAuthStateConfig;
 };
 
 const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -73,9 +76,11 @@ export function buildApp(cfg: AppCfg): { app: express.Express; cleanup: () => vo
     next();
   });
 
-  app.get("/health", (_req, res) => res.json({ ok: true, service: "aacworkflow-mcp", upstream: SERVER_URL }));
-
-  const oauthProvider = createOAuthProvider({ serverUrl: SERVER_URL });
+  const oauthProvider = createOAuthProvider({ serverUrl: SERVER_URL, state: cfg.oauthState });
+  app.get("/health", (_req, res) => {
+    const ok = oauthProvider.isHealthy();
+    res.status(ok ? 200 : 503).json({ ok, service: "aacworkflow-mcp", upstream: SERVER_URL });
+  });
 
   // Consent-form submission for the token-paste page rendered by oauthProvider.authorize().
   // Must be registered BEFORE mcpAuthRouter below: that router mounts its authorize handler
@@ -112,8 +117,22 @@ export function buildApp(cfg: AppCfg): { app: express.Express; cleanup: () => vo
     requireBearerAuth({ verifier: oauthProvider, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(MCP_URL) }),
   );
 
-  type SessionEntry = { transport: StreamableHTTPServerTransport; lastActivity: number };
+  type SessionOwner = { clientId: string; tokenFingerprint: string };
+  type SessionEntry = { transport: StreamableHTTPServerTransport; lastActivity: number; owner: SessionOwner };
   const sessions = new Map<string, SessionEntry>();
+
+  function requestOwner(req: Request): SessionOwner | undefined {
+    const aacToken = req.auth?.extra?.aacToken;
+    if (!req.auth?.clientId || typeof aacToken !== "string" || !aacToken) return undefined;
+    return { clientId: req.auth.clientId, tokenFingerprint: createHash("sha256").update(aacToken).digest("hex") };
+  }
+
+  function authorizeSession(req: Request, res: Response, session: SessionEntry): boolean {
+    const owner = requestOwner(req);
+    if (owner?.clientId === session.owner.clientId && owner.tokenFingerprint === session.owner.tokenFingerprint) return true;
+    res.status(403).json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Session authentication does not match" } });
+    return false;
+  }
 
   const reapTimer = setInterval(() => {
     const cutoff = Date.now() - SESSION_IDLE_TIMEOUT_MS;
@@ -134,7 +153,8 @@ export function buildApp(cfg: AppCfg): { app: express.Express; cleanup: () => vo
 
       if (!existing && isInitializeRequest(req.body)) {
         const aacToken = req.auth?.extra?.aacToken as string | undefined;
-        if (!aacToken) {
+        const owner = requestOwner(req);
+        if (!aacToken || !owner) {
           res.status(401).json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Missing AACWorkflow token" } });
           return;
         }
@@ -142,7 +162,7 @@ export function buildApp(cfg: AppCfg): { app: express.Express; cleanup: () => vo
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
-            sessions.set(id, { transport, lastActivity: Date.now() });
+            sessions.set(id, { transport, lastActivity: Date.now(), owner });
             logger.info("mcp session started", { sessionId: id });
           },
         });
@@ -166,6 +186,7 @@ export function buildApp(cfg: AppCfg): { app: express.Express; cleanup: () => vo
         });
         return;
       }
+      if (!authorizeSession(req, res, existing)) return;
       existing.lastActivity = Date.now();
       await existing.transport.handleRequest(req, res, req.body);
     } catch (e) {
@@ -180,6 +201,7 @@ export function buildApp(cfg: AppCfg): { app: express.Express; cleanup: () => vo
       res.status(400).send("Unknown or missing Mcp-Session-Id");
       return;
     }
+    if (!authorizeSession(req, res, existing)) return;
     existing.lastActivity = Date.now();
     await existing.transport.handleRequest(req, res);
   };
