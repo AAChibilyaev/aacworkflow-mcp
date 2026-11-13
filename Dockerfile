@@ -20,6 +20,7 @@ ENV NODE_ENV=production PORT=8787
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+RUN mkdir -p /data/oauth && chown node:node /data/oauth
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=4s --start-period=5s --retries=3 \
   CMD wget -qO- "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 || exit 1
